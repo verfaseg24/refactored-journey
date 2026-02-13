@@ -1,0 +1,101 @@
+name: Build Custom Debug APK
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build_debug_apk:
+    name: Build custom debug apk
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up JDK version
+        uses: actions/setup-java@v4
+        with:
+          java-version-file: .github/.java-version
+          distribution: 'adopt'
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.18.3'
+
+      - name: Install NDK
+        run: |
+          echo "y" | sudo ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --install "ndk;21.4.7075529"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v5
+        with:
+          cache-encryption-key: ${{ secrets.GRADLE_ENCRYPTION_KEY }}
+
+      - name: Create keystore directory
+        run: mkdir -p $HOME/jenkins_static/com.duckduckgo.mobile.android/
+
+      - name: Decode debug keys (if available)
+        if: ${{ secrets.DEBUG_PROPERTIES != '' }}
+        uses: davidSchuppa/base64Secret-toFile-action@v2
+        with:
+          secret: ${{ secrets.DEBUG_PROPERTIES }}
+          fileName: ddg_android_debug_build.properties
+          destination-path: $HOME/jenkins_static/com.duckduckgo.mobile.android/
+
+      - name: Decode debug key file (if available)
+        if: ${{ secrets.DEBUG_KEY != '' }}
+        uses: davidSchuppa/base64Secret-toFile-action@v2
+        with:
+          secret: ${{ secrets.DEBUG_KEY }}
+          fileName: android
+          destination-path: $HOME/jenkins_static/com.duckduckgo.mobile.android/
+
+      - name: Create dummy keystore (fallback)
+        if: ${{ secrets.DEBUG_KEY == '' }}
+        run: |
+          keytool -genkey -v -keystore $HOME/jenkins_static/com.duckduckgo.mobile.android/android \
+            -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass android -keypass android \
+            -dname "CN=Android Debug,O=Android,C=US"
+
+      - name: Create debug properties (fallback)
+        if: ${{ secrets.DEBUG_PROPERTIES == '' }}
+        run: |
+          cat > $HOME/jenkins_static/com.duckduckgo.mobile.android/ddg_android_debug_build.properties << EOF
+          releaseKeyAlias=androiddebugkey
+          releaseKeyPassword=android
+          releaseStorePassword=android
+          EOF
+
+      - name: Assemble the project
+        env:
+          MALICIOUS_SITE_PROTECTION_AUTH_TOKEN: ${{ secrets.MALICIOUS_SITE_PROTECTION_AUTH_TOKEN }}
+        run: ./gradlew assembleInternalDebug -Pforce-default-variant
+
+      - name: Obtain debug apk
+        if: always()
+        run: |
+          APK_PATH=$(find app/build/outputs/apk -name "*internal-debug.apk" | head -n 1)
+          cp "$APK_PATH" custom-browser-debug.apk
+
+      - name: Upload debug apk
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: custom-browser-debug
+          path: custom-browser-debug.apk
+
+      - name: Cleanup secrets
+        if: always()
+        run: rm -rf "$HOME/jenkins_static/com.duckduckgo.mobile.android/"*.properties "$HOME/jenkins_static/com.duckduckgo.mobile.android/android"
